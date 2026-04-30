@@ -25,6 +25,8 @@ K_ENERGY   = 5.3
 K_CART_P   = 8.0
 K_CART_D   = 4.0
 
+LOG_RATE = 1/10
+
 # Initialization values
 x0, x_dot0 = 0.0, 0.0
 q10, q1dot0 = PI, 1.5
