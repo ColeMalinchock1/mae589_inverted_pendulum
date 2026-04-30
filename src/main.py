@@ -11,7 +11,7 @@ import mujoco
 import mujoco.viewer
 import csv
 
-from cart_manipulator import CartManipulator
+from lib.cart_manipulator import CartManipulator
 from lib.constants import (
     G,
     U_MIN, U_MAX,
