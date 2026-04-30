@@ -17,7 +17,7 @@ BC = 0.5
 B1 = 0.001
 B2 = 0.001
 
-TARGETS    = [1.5, -1.5]
+TARGETS    = [3.0, -3.0]
 THRESHOLD  = 0.3
 U_MIN, U_MAX = -50, 50
 
