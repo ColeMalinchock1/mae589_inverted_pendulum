@@ -22,9 +22,10 @@ TARGET_X_2 = 5
 THRESHOLD  = 0.3
 U_MIN, U_MAX = -50, 50
 
+# 5.3, 8.0, 4.0
 K_ENERGY   = 5.3
-K_CART_P   = 8.0
-K_CART_D   = 4.0
+K_CART_P   = 7.0
+K_CART_D   = 3.5
 
 LOG_RATE = 1/10
 

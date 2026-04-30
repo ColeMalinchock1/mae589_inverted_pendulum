@@ -32,8 +32,8 @@ from lib.constants import (
 
 # Minimum center-to-center separation before repulsion kicks in.
 # Cart half-width is 0.5 m, so full width = 1.0 m; 1.2 m gives a 0.2 m buffer.
-SAFE_DIST = 1.2   # [m]
-K_REPULSE = 30.0  # repulsive gain [N/m]
+SAFE_DIST = 10.0   # [m]
+K_REPULSE = 4.0  # repulsive gain [N/m]
 
 
 class MuJoCoRunner():
@@ -382,14 +382,8 @@ class MuJoCoRunner():
             overlap   = SAFE_DIST - dist
             f_repulse = K_REPULSE * overlap
 
-            if separation >= 0:
-                # Cart 1 is right of cart 2 — push cart 1 further right, cart 2 further left
-                u_1 += f_repulse
-                u_2 -= f_repulse
-            else:
-                # Cart 1 is left of cart 2 — push cart 1 further left, cart 2 further right
-                u_1 -= f_repulse
-                u_2 += f_repulse
+            u_1 -= f_repulse
+            u_2 += f_repulse
 
         return u_1, u_2
 
