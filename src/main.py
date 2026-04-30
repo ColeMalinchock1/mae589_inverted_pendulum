@@ -24,11 +24,16 @@ from lib.constants import (
     G,
     U_MIN, U_MAX,
     MC, M1, M2, L1, LC1, LC2, I1, I2,
-    TARGETS, THRESHOLD,
+    TARGET_X_1, TARGET_X_2, THRESHOLD,
     K_ENERGY, K_CART_P, K_CART_D,
     LOG_RATE,
-    x0, x_dot0, q10, q1dot0, q20, q2dot0 # INITIAL STATES
+    x0_1, x0_2, x_dot0, q10, q1_dot0, q20_1, q20_2, q2_dot0 # INITIAL STATES
 )
+
+# Minimum center-to-center separation before repulsion kicks in.
+# Cart half-width is 0.5 m, so full width = 1.0 m; 1.2 m gives a 0.2 m buffer.
+SAFE_DIST = 1.2   # [m]
+K_REPULSE = 30.0  # repulsive gain [N/m]
 
 
 class MuJoCoRunner():
@@ -39,12 +44,13 @@ class MuJoCoRunner():
 
         # Creates the model from the xml
         self.model = mujoco.MjModel.from_xml_path("../world/scene.xml")
-        
+        print(self.model)
+
         # Gets the data of the model
         self.data = mujoco.MjData(self.model)
-        
+
         # Creates the cart object
-        self.cart = CartManipulator(self.model, self.data)
+        self.carts = CartManipulator(self.model, self.data)
 
         # Gets the timestep for the model
         self.dt = self.model.opt.timestep
@@ -53,28 +59,25 @@ class MuJoCoRunner():
         self.log_file = open("sim_log.csv", "w", newline="")
         self.logger = csv.writer(self.log_file)
         self.logger.writerow([
-            "t", "phase", "target_x",
+            "cart_id", "t", "phase", "target_x",
             "x", "x_dot", "theta1_deg", "theta2_deg",
             "theta1_dot", "theta2_dot", "u"
         ])
-        self.log_every = 1/LOG_RATE
+        self.log_every = int(1 / LOG_RATE)
         self.step_count = 0
 
-        # Set initial state (pendulums hanging down)
-        self.data.qpos[self.model.joint('slider').qposadr[0]] = x0
-        self.data.qpos[self.model.joint('hinge1').qposadr[0]] = q10  # = pi
-        self.data.qpos[self.model.joint('hinge2').qposadr[0]] = q20  # = pi
-        self.data.qvel[self.model.joint('slider').dofadr[0]]  = x_dot0
-        self.data.qvel[self.model.joint('hinge1').dofadr[0]]  = q1dot0
-        self.data.qvel[self.model.joint('hinge2').dofadr[0]]  = q2dot0
+        # Set initial states for both carts
+        self.carts.set_state(x0_1, x_dot0, q10, q20_1, q1_dot0, q2_dot0, cart_id=1)
+        self.carts.set_state(x0_2, x_dot0, q10, q20_2, q1_dot0, q2_dot0, cart_id=2)
+
         mujoco.mj_forward(self.model, self.data)
 
-        # Complete the setup of the 
+        # Complete the setup
         self.setup()
 
 
     def setup(self):
-        """ Precompute the h parameters """
+        """ Precompute the h parameters and LQR gain """
 
         h1 = MC + M1 + M2
         h2 = M1*LC1 + M2*L1
@@ -101,7 +104,7 @@ class MuJoCoRunner():
         # Column vectors: how gravity and input map through the inertia
         t1c = M_inv @ np.array([0, h7, 0])
         t2c = M_inv @ np.array([0,  0, h8])
-        bc = M_inv @ np.array([1,  0,  0])
+        bc  = M_inv @ np.array([1,  0,  0])
 
         # State vector: [x, xdot, theta1, theta1dot, theta2, theta2dot]
         self.A = np.array([
@@ -121,146 +124,172 @@ class MuJoCoRunner():
         P = linalg.solve_continuous_are(self.A, self.B, Q, R)
         self.K = linalg.inv(R) @ self.B.T @ P
 
-        # Print the LQR k
         print("LQR gain K computed:")
         print(self.K)
-        
-        # Initialize the values for the simulator
+
+        # Initialize the simulator state
         self.sim_time = 0.0
-        self.phase = "swingup"
-        self.target_idx = 0
+        self.phase_1  = "swingup"
+        self.phase_2  = "swingup"
 
 
     def run(self):
         """ Main loop to be ran for the simulation and controls """
 
-        # Launch the MuJoCo simulator viewer
         with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
 
             try:
 
-                # Get the timer
                 next_time = time.perf_counter()
                 while viewer.is_running():
 
-                    # Get the current values of the cart
-                    arm_angles = self.cart.get_arm_angles()
-                    arm_velocities = self.cart.get_arm_velocities()
-                    cart_position = self.cart.get_cart_position()
-                    cart_velocity = self.cart.get_cart_velocity()
+                    # Get the current values of both carts
+                    cart_1_arm_angles     = self.carts.get_arm_angles(cart_id=1)
+                    cart_1_arm_velocities = self.carts.get_arm_velocities(cart_id=1)
+                    cart_1_position       = self.carts.get_cart_position(cart_id=1)
+                    cart_1_velocity       = self.carts.get_cart_velocity(cart_id=1)
 
-                    # Compute the controller input on the cart
-                    u = self.controls(cart_position, cart_velocity, arm_angles, arm_velocities)
+                    cart_2_arm_angles     = self.carts.get_arm_angles(cart_id=2)
+                    cart_2_arm_velocities = self.carts.get_arm_velocities(cart_id=2)
+                    cart_2_position       = self.carts.get_cart_position(cart_id=2)
+                    cart_2_velocity       = self.carts.get_cart_velocity(cart_id=2)
 
-                    # Apply the input on the cart
-                    self.cart.apply_force(u)
+                    # Compute controller inputs for both carts
+                    u1, u2 = self.controls(
+                        cart_1_position, cart_1_velocity, cart_1_arm_angles, cart_1_arm_velocities,
+                        cart_2_position, cart_2_velocity, cart_2_arm_angles, cart_2_arm_velocities
+                    )
+
+                    # Apply forces and step the simulation
+                    self.carts.apply_force(u1, u2)
                     mujoco.mj_step(self.model, self.data)
                     viewer.sync()
 
                     # Increment the sim time
                     self.sim_time += self.dt
-                    next_time += self.dt
+                    next_time     += self.dt
 
-                    # Check if the system needs to sleep
+                    # Real-time pacing
                     sleep_time = next_time - time.perf_counter()
                     if sleep_time > 0:
                         time.sleep(sleep_time)
                     else:
                         next_time = time.perf_counter()
 
-            # Check for keyboard interrupt
             except KeyboardInterrupt:
                 print("Simulation stopped.")
 
-            # Log the results
             finally:
                 self.log_file.close()
                 print("Log saved to sim_log.csv")
 
 
-    def controls(self, cart_position:float, cart_velocity:float, arm_angles:tuple[float, float], arm_velocities:tuple[float, float]) -> float:
-        """ Performs the control algorithms to output u, the input into the system
+    def controls(self,
+                 cart_1_position: float,   cart_1_velocity: float,
+                 cart_1_arm_angles: tuple, cart_1_arm_velocities: tuple,
+                 cart_2_position: float,   cart_2_velocity: float,
+                 cart_2_arm_angles: tuple, cart_2_arm_velocities: tuple
+                 ) -> tuple[float, float]:
+        """ Performs the control algorithms to output u1 and u2
 
         Args:
-            cart_position (float): The cart x position
-            cart_velocity (float): The cart y position
-            arm_angles (tuple[float, float]): The arm angles
-            arm_velocities (tuple[float, float]): The arm angular velocities
+            cart_1_position (float): Cart 1 x position
+            cart_1_velocity (float): Cart 1 x velocity
+            cart_1_arm_angles (tuple): Cart 1 arm angles (theta1, theta2)
+            cart_1_arm_velocities (tuple): Cart 1 arm angular velocities
+            cart_2_position (float): Cart 2 x position
+            cart_2_velocity (float): Cart 2 x velocity
+            cart_2_arm_angles (tuple): Cart 2 arm angles (theta1, theta2)
+            cart_2_arm_velocities (tuple): Cart 2 arm angular velocities
 
         Returns:
-            float: The input u for the cart
+            tuple[float, float]: Control inputs (u1, u2) for cart 1 and cart 2
         """
 
-        # Get the current values of the cart
-        x = float(np.asarray(cart_position).flat[0])
-        x_dot = float(np.asarray(cart_velocity).flat[0])
-        theta1 = float(np.asarray(arm_angles).flat[0])
-        theta2 = float(np.asarray(arm_angles).flat[1])
-        theta1_dot = float(np.asarray(arm_velocities).flat[0])
-        theta2_dot = float(np.asarray(arm_velocities).flat[1])
+        # Unpack scalars
+        x_1          = float(np.asarray(cart_1_position).flat[0])
+        x_dot_1      = float(np.asarray(cart_1_velocity).flat[0])
+        theta1_1     = float(np.asarray(cart_1_arm_angles).flat[0])
+        theta2_1     = float(np.asarray(cart_1_arm_angles).flat[1])
+        theta1_dot_1 = float(np.asarray(cart_1_arm_velocities).flat[0])
+        theta2_dot_1 = float(np.asarray(cart_1_arm_velocities).flat[1])
 
-        # Create the current state of the cart
-        state = {"x": x, "x_dot": x_dot,
-                "theta1": theta1, "theta1_dot": theta1_dot,
-                "theta2": theta2, "theta2_dot": theta2_dot}
-        
-        # Get the target x position
-        target_x = TARGETS[self.target_idx]
+        x_2          = float(np.asarray(cart_2_position).flat[0])
+        x_dot_2      = float(np.asarray(cart_2_velocity).flat[0])
+        theta1_2     = float(np.asarray(cart_2_arm_angles).flat[0])
+        theta2_2     = float(np.asarray(cart_2_arm_angles).flat[1])
+        theta1_dot_2 = float(np.asarray(cart_2_arm_velocities).flat[0])
+        theta2_dot_2 = float(np.asarray(cart_2_arm_velocities).flat[1])
 
-        # Check what the current phase is
-        if self.phase == "swingup":
+        # Build state dicts
+        state_1 = {"x": x_1, "x_dot": x_dot_1,
+                   "theta1": theta1_1, "theta1_dot": theta1_dot_1,
+                   "theta2": theta2_1, "theta2_dot": theta2_dot_1}
 
-            # Get the energy to swing up
-            u = self.energy_swingup(x, x_dot, theta1, theta2, theta1_dot, theta2_dot)
+        state_2 = {"x": x_2, "x_dot": x_dot_2,
+                   "theta1": theta1_2, "theta1_dot": theta1_dot_2,
+                   "theta2": theta2_2, "theta2_dot": theta2_dot_2}
 
-            # Hand off to LQR once both links are near the top
-            if abs(theta1) < THRESHOLD and abs(theta2) < THRESHOLD:
-                print(f"[t={self.sim_time:.2f}s] Switching to LQR | "
-                      f"theta1={np.degrees(theta1):.1f}° "
-                      f"theta2={np.degrees(theta2):.1f}°")
-                
-                # Change the phase to lqr
-                self.phase = "lqr"
+        target_x_1 = TARGET_X_1
+        target_x_2 = TARGET_X_2
 
+        # --- Cart 1 control (handled independently of cart 2's phase) ---
+        if self.phase_1 == "swingup":
+            u_1 = self.energy_swingup(state_1)
+            if abs(theta1_1) < THRESHOLD and abs(theta2_1) < THRESHOLD:
+                print(f"[t={self.sim_time:.2f}s] Cart 1 switching to LQR | "
+                      f"theta1={np.degrees(theta1_1):.1f}° "
+                      f"theta2={np.degrees(theta2_1):.1f}°")
+                self.phase_1 = "lqr"
         else:
+            u_1 = self.lqr_control(state_1, target_x_1)
 
-            # Get the lqr input
-            u = self.lqr_control(state, target_x)
+        # --- Cart 2 control (handled independently of cart 1's phase) ---
+        if self.phase_2 == "swingup":
+            u_2 = self.energy_swingup(state_2)
+            if abs(theta1_2) < THRESHOLD and abs(theta2_2) < THRESHOLD:
+                print(f"[t={self.sim_time:.2f}s] Cart 2 switching to LQR | "
+                      f"theta1={np.degrees(theta1_2):.1f}° "
+                      f"theta2={np.degrees(theta2_2):.1f}°")
+                self.phase_2 = "lqr"
+        else:
+            u_2 = self.lqr_control(state_2, target_x_2)
 
-            # Once stable at current target, advance to the next one
-            if (abs(x - target_x) < 0.05 and abs(theta1) < 0.05 and
-                    abs(theta2) < 0.05 and abs(x_dot) < 0.05):
-                
-                # Increment to the next target if there is another one
-                if self.target_idx < len(TARGETS) - 1:
-                    self.target_idx += 1
-                    print(f"[t={self.sim_time:.2f}s] Moving to endpoint "
-                          f"{self.target_idx + 1}: x = {TARGETS[self.target_idx]}")
+        # --- Collision avoidance (applied regardless of phase) ---
+        u_1, u_2 = self._collision_avoidance(x_1, x_dot_1, u_1, x_2, x_dot_2, u_2)
 
-        # Make sure the u is between the min and max
-        u = float(np.clip(u, U_MIN, U_MAX))
+        # Clip to actuator limits
+        u_1 = float(np.clip(u_1, U_MIN, U_MAX))
+        u_2 = float(np.clip(u_2, U_MIN, U_MAX))
 
-        # Log every step
+        # --- Logging ---
         self.step_count += 1
         if self.step_count % self.log_every == 0:
             self.logger.writerow([
-                f"{self.sim_time:.4f}", self.phase, f"{target_x:.2f}",
-                f"{x:.4f}", f"{x_dot:.4f}",
-                f"{np.degrees(theta1):.2f}", f"{np.degrees(theta2):.2f}",
-                f"{theta1_dot:.4f}", f"{theta2_dot:.4f}",
-                f"{u:.4f}"
+                1, f"{self.sim_time:.4f}", self.phase_1, f"{target_x_1:.2f}",
+                f"{x_1:.4f}", f"{x_dot_1:.4f}",
+                f"{np.degrees(theta1_1):.2f}", f"{np.degrees(theta2_1):.2f}",
+                f"{theta1_dot_1:.4f}", f"{theta2_dot_1:.4f}",
+                f"{u_1:.4f}"
+            ])
+            self.logger.writerow([
+                2, f"{self.sim_time:.4f}", self.phase_2, f"{target_x_2:.2f}",
+                f"{x_2:.4f}", f"{x_dot_2:.4f}",
+                f"{np.degrees(theta1_2):.2f}", f"{np.degrees(theta2_2):.2f}",
+                f"{theta1_dot_2:.4f}", f"{theta2_dot_2:.4f}",
+                f"{u_2:.4f}"
             ])
 
-        # Print every 50
+        # Print every 50 steps
         if self.step_count % 50 == 0:
-            print(f"t={self.sim_time:6.2f}s | phase={self.phase:10s} | "
-                  f"x={x:6.3f} | θ1={np.degrees(theta1):7.2f}° | "
-                  f"θ2={np.degrees(theta2):7.2f}° | u={u:7.3f}")
+            print(f"t={self.sim_time:6.2f}s | "
+                  f"C1 [{self.phase_1:7s}] x={x_1:6.3f} θ1={np.degrees(theta1_1):7.2f}° θ2={np.degrees(theta2_1):7.2f}° u={u_1:7.3f} | "
+                  f"C2 [{self.phase_2:7s}] x={x_2:6.3f} θ1={np.degrees(theta1_2):7.2f}° θ2={np.degrees(theta2_2):7.2f}° u={u_2:7.3f}")
 
-        return u
-    
+        return u_1, u_2
 
-    def lqr_control(self, state:dict, target_x:float) -> float:
+
+    def lqr_control(self, state: dict, target_x: float) -> float:
         """ The LQR controller on the cart to hold the double pendulum upwards
 
         Args:
@@ -271,9 +300,8 @@ class MuJoCoRunner():
             float: The input value for the cart
         """
 
-        # The x vector
         x_vec = np.array([
-            [float(state['x']) - float(target_x)],
+            [float(state['x'])          - float(target_x)],
             [float(state['x_dot'])],
             [float(state['theta1'])],
             [float(state['theta1_dot'])],
@@ -281,54 +309,93 @@ class MuJoCoRunner():
             [float(state['theta2_dot'])]
         ], dtype=float)
 
-
         return float(-(self.K @ x_vec).item())
-    
 
-    def energy_swingup(self, x:float, x_dot:float, theta1:float, theta2:float, theta1_dot:float, theta2_dot:float) -> float:
-        """ Pumps mechanical energy into the two-link pendulum until it has enough to reach the upright position, then lets LQR take over.
+
+    def energy_swingup(self, state: dict) -> float:
+        """ Pumps mechanical energy into the two-link pendulum until it has enough
+        to reach the upright position, then lets LQR take over.
 
         Args:
-            x (float): Cart x position
-            x_dot (float): Cart x velocity
-            theta1 (float): Arm 1 angle
-            theta2 (float): Arm 2 angle
-            theta1_dot (float): Arm 1 angular velocity
-            theta2_dot (float): Arm 2 angular velocity
+            state (dict): The current state of the cart and arms
 
         Returns:
-            float: The swing up force input
+            float: The swing-up force input
         """
 
-        # The total kinetic energy of the system
+        x          = state['x']
+        x_dot      = state['x_dot']
+        theta1     = state['theta1']
+        theta2     = state['theta2']
+        theta1_dot = state['theta1_dot']
+        theta2_dot = state['theta2_dot']
+
+        # Total kinetic energy of the two-link system
         KE = 0.5 * (
             self.h4 * theta1_dot**2
             + 2 * self.h5 * np.cos(theta1 - theta2) * theta1_dot * theta2_dot
             + self.h6 * theta2_dot**2
         )
 
-        # The total potential energy of the system
+        # Total potential energy (zero reference at hanging-down equilibrium)
         PE = self.h7 * (np.cos(theta1) - 1) + self.h8 * (np.cos(theta2) - 1)
 
-        # The total energy of the system
-        E  = KE + PE
+        E = KE + PE
 
-        # Check that the energy is not too high and over-spinning
+        # Pump energy in when the system is below the target energy level
         if E < 0:
-
-            # Calculate the input from the kinetic energy and angular values of the first arm
             u_swing = K_ENERGY * theta1_dot * np.cos(theta1) * (-E)
         else:
             u_swing = 0.0
 
-        # Get the cart force input from the displacement and velocity
-        u_cart  = -K_CART_P * x - K_CART_D * x_dot
+        # PD term to keep the cart near the origin during swing-up
+        u_cart = -K_CART_P * x - K_CART_D * x_dot
 
         return u_swing + u_cart
 
 
+    def _collision_avoidance(self,
+                              x_1: float, x_dot_1: float, u_1: float,
+                              x_2: float, x_dot_2: float, u_2: float
+                              ) -> tuple[float, float]:
+        """ Adds a repulsive force to each cart when they get too close.
+
+        When the separation drops below SAFE_DIST, a force proportional to the
+        overlap is added to push both carts away from each other.
+
+        Args:
+            x_1 (float): Cart 1 position
+            x_dot_1 (float): Cart 1 velocity (unused, reserved for damping extension)
+            u_1 (float): Cart 1 control input before avoidance
+            x_2 (float): Cart 2 position
+            x_dot_2 (float): Cart 2 velocity (unused, reserved for damping extension)
+            u_2 (float): Cart 2 control input before avoidance
+
+        Returns:
+            tuple[float, float]: Adjusted (u_1, u_2) with repulsion applied
+        """
+
+        separation = x_1 - x_2   # positive when cart 1 is to the right of cart 2
+        dist = abs(separation)
+
+        if dist < SAFE_DIST:
+            overlap   = SAFE_DIST - dist
+            f_repulse = K_REPULSE * overlap
+
+            if separation >= 0:
+                # Cart 1 is right of cart 2 — push cart 1 further right, cart 2 further left
+                u_1 += f_repulse
+                u_2 -= f_repulse
+            else:
+                # Cart 1 is left of cart 2 — push cart 1 further left, cart 2 further right
+                u_1 -= f_repulse
+                u_2 += f_repulse
+
+        return u_1, u_2
+
+
 if __name__ == "__main__":
-    
+
     # Create the MuJoCo Runner
     runner = MuJoCoRunner()
 

@@ -1,5 +1,6 @@
 <mujoco model="scene">
-    <include file="cart_pendulum.xml" />
+    <include file="cart_pendulum1.xml" />
+    <include file="cart_pendulum2.xml" />
     <option timestep="0.01" gravity="0 0 -9.81" />
 
     <default>
