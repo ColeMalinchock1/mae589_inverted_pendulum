@@ -32,8 +32,8 @@ from lib.constants import (
 
 # Minimum center-to-center separation before repulsion kicks in.
 # Cart half-width is 0.5 m, so full width = 1.0 m; 1.2 m gives a 0.2 m buffer.
-SAFE_DIST = 10.0   # [m]
-K_REPULSE = 4.0  # repulsive gain [N/m]
+SAFE_DIST = 6.0   # [m]
+K_REPULSE = 9.3 # repulsive gain [N/m]
 
 
 class MuJoCoRunner():
