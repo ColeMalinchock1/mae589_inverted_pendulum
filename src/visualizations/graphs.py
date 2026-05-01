@@ -23,7 +23,7 @@ import numpy as np
 
 # ── Load data ──────────────────────────────────────────────────────────────────
 
-df = pd.read_csv("logs/sim_log(1.5,-1.5).csv")
+df = pd.read_csv("logs/sim_log(3.0,-3.0).csv")
 
 # Find the time of first phase transition (swingup → lqr)
 lqr_rows = df[df["phase"] == "lqr"]
@@ -70,7 +70,6 @@ add_phase_line(ax1)
 
 ax1.set_xlabel("Time (s)")
 ax1.set_ylabel("Angle (°)")
-ax1.set_title("Arm Angles Over Time")
 ax1.legend(loc="upper right")
 ax1.grid(alpha=GRID_ALPHA)
 
@@ -102,7 +101,6 @@ ax2.fill_between(df["t"], df["x"], df["target_x"],
 
 ax2.set_xlabel("Time (s)")
 ax2.set_ylabel("Position (m)")
-ax2.set_title("Cart Position vs Target")
 ax2.legend(handles=[
     mpatches.Patch(color=SWINGUP_COLOR, alpha=0.4, label="Swing-up"),
     mpatches.Patch(color=LQR_COLOR,     alpha=0.4, label="LQR"),
@@ -137,7 +135,6 @@ ax3.axhline(0, color="black", linewidth=0.6, linestyle=":")
 
 ax3.set_xlabel("Time (s)")
 ax3.set_ylabel("Control force u (N)")
-ax3.set_title("Control Input Over Time")
 ax3.legend(fontsize=9)
 ax3.grid(alpha=GRID_ALPHA)
 
@@ -153,7 +150,7 @@ points_su = np.array([swingup["theta1_deg"], swingup["theta1_dot"]]).T.reshape(-
 segments_su = np.concatenate([points_su[:-1], points_su[1:]], axis=1)
 
 from matplotlib.collections import LineCollection
-lc_su = LineCollection(segments_su, cmap="Oranges",
+lc_su = LineCollection(segments_su,
                         norm=plt.Normalize(0, len(segments_su)),
                         linewidth=1.5, alpha=0.9)
 lc_su.set_array(np.arange(len(segments_su)))
@@ -163,7 +160,7 @@ ax4.add_collection(lc_su)
 if not lqr.empty:
     points_lqr = np.array([lqr["theta1_deg"], lqr["theta1_dot"]]).T.reshape(-1, 1, 2)
     segments_lqr = np.concatenate([points_lqr[:-1], points_lqr[1:]], axis=1)
-    lc_lqr = LineCollection(segments_lqr, cmap="Blues",
+    lc_lqr = LineCollection(segments_lqr,
                              norm=plt.Normalize(0, len(segments_lqr)),
                              linewidth=1.5, alpha=0.9)
     lc_lqr.set_array(np.arange(len(segments_lqr)))
@@ -187,13 +184,8 @@ ax4.scatter(0, 0, color="black", s=80, zorder=6, marker="+", linewidths=2, label
 ax4.autoscale()
 ax4.set_xlabel("θ₁ (°)")
 ax4.set_ylabel("θ̇₁ (rad/s)")
-ax4.set_title("Phase Portrait — Link 1")
 ax4.legend(fontsize=9)
 ax4.grid(alpha=GRID_ALPHA)
-
-# Colorbars
-cb_su = fig4.colorbar(lc_su, ax=ax4, fraction=0.03, pad=0.04)
-cb_su.set_label("Swing-up progression →", fontsize=8)
 
 fig4.tight_layout()
 

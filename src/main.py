@@ -55,7 +55,7 @@ class MuJoCoRunner():
         self.logger.writerow([
             "t", "phase", "target_x",
             "x", "x_dot", "theta1_deg", "theta2_deg",
-            "theta1_dot", "theta2_dot", "u"
+            "theta1_dot", "theta2_dot", "u", "ke", "pe"
         ])
         self.log_every = 1/LOG_RATE
         self.step_count = 0
@@ -129,6 +129,7 @@ class MuJoCoRunner():
         self.sim_time = 0.0
         self.phase = "swingup"
         self.target_idx = 0
+        self.pe = self.ke = 0.0
 
 
     def run(self):
@@ -248,7 +249,9 @@ class MuJoCoRunner():
                 f"{x:.4f}", f"{x_dot:.4f}",
                 f"{np.degrees(theta1):.2f}", f"{np.degrees(theta2):.2f}",
                 f"{theta1_dot:.4f}", f"{theta2_dot:.4f}",
-                f"{u:.4f}"
+                f"{u:.4f}",
+                f"{self.ke:.4f}",
+                f"{self.pe:.4f}"
             ])
 
         # Print every 50
@@ -312,6 +315,9 @@ class MuJoCoRunner():
 
         # The total energy of the system
         E  = KE + PE
+
+        self.ke = KE
+        self.pe = PE
 
         # Check that the energy is not too high and over-spinning
         if E < 0:

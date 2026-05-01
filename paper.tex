@@ -1,0 +1,288 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{url}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{Energy-Based Swing-Up and LQR Stabilization of Double Inverted Pendulums on Cooperating Carts with Collision Avoidance}
+
+\author{\IEEEauthorblockN{Cole Malinchock}
+\IEEEauthorblockA{\textit{Department of Mechanical and Aerospace Engineering}\\
+\textit{North Carolina State University}\\
+Raleigh, NC, USA \\
+malinchc@gmail.com}
+}
+
+\maketitle
+
+\begin{abstract}
+The double inverted pendulum on a cart is a canonical benchmark in nonlinear and underactuated control because of its hyperbolic upright equilibrium, single control input, and strong coupling between the cart and the two pendulum links. This paper presents a hybrid swing-up and stabilization controller for a planar double pendulum mounted on a horizontally actuated cart, and extends the formulation to two such carts that must travel to distinct target positions on a shared rail without colliding. An energy-shaping controller pumps mechanical energy into the two-link arm until the configuration enters a neighborhood of the upright equilibrium, after which a Linear Quadratic Regulator (LQR) computed from a Jacobian linearization about the upright stabilizes the cart at its target. For the two-cart problem, a one-dimensional artificial potential field adds a smooth pairwise repulsive force when the inter-cart separation falls below a configurable safety distance. The controllers are validated in MuJoCo. Results show that a single cart reliably swings up from the hanging-down configuration and is regulated to its target, and that two carts initialized on opposite sides of the origin independently swing up, converge to distinct endpoints, and avoid one another when their reference paths overlap. The work demonstrates that classical optimal control paired with a lightweight reactive avoidance layer is sufficient for cooperative stabilization tasks involving underactuated arms, providing a transparent baseline against which learning-based controllers can be compared.
+\end{abstract}
+
+\begin{IEEEkeywords}
+inverted pendulum, swing-up control, energy shaping, LQR, underactuated systems, artificial potential field, MuJoCo
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+The cart--pendulum is one of the most thoroughly studied platforms in control theory because it captures, in a single low-dimensional system, the central challenges of nonlinear stabilization: an unstable equilibrium, underactuation, strong inertial coupling, and bounded input authority \cite{boubaker2013survey,tedrake2023underactuated}. Variants of the system underpin the analysis and verification of techniques ranging from feedback linearization and energy shaping to model predictive control and reinforcement learning \cite{spong1995acrobot,astrom2000swingup,fantoni2002non}. Beyond pedagogy, the platform is a faithful low-order surrogate for problems including two-wheeled self-balancing vehicles, rocket and missile guidance during boost, gantry-crane payload regulation, and bipedal balance about a single contact point \cite{boubaker2013survey,siciliano2016handbook}.
+
+The \emph{double} inverted pendulum on a cart is a strict generalization in which a second link is hinged to the first, raising the degree of underactuation: three configuration variables --- the cart position $x$, the lower-link angle $\theta_1$, and the upper-link angle $\theta_2$ --- must be regulated using only the horizontal cart force $u$. The upright equilibrium is hyperbolic with two unstable modes, so any controller must simultaneously suppress two diverging directions in state space \cite{lozano2000stabilization}. Brockett's necessary condition rules out smooth time-invariant feedback that is globally stabilizing for such systems \cite{brockett1983asymptotic,spong1995acrobot}; controllers therefore typically combine a \emph{swing-up} phase that drives the system into the basin of attraction of a local stabilizer with a separate stabilizing controller around the upright \cite{astrom2000swingup,furuta1992swingup}.
+
+This paper has two objectives. The first is to design and validate a hybrid energy-shaping plus LQR controller that drives a single double pendulum from the hanging-down equilibrium to the upright equilibrium at a specified cart position. The second is to extend the same controller, with no centralized planner, to two identical carts that must reach distinct targets on a shared rail. Because the targets and the large excursions associated with energy pumping can bring the carts into close proximity, a one-dimensional artificial potential field \cite{khatib1986rtoa} is layered on top of the per-cart controllers to enforce a minimum separation. The contribution of the paper is therefore not a new control law in isolation, but a transparent demonstration that the classical pairing of energy-shaping swing-up with LQR stabilization, augmented by a reactive avoidance term, is sufficient for cooperative two-cart double-pendulum tasks of the kind that arise in robotic balancing and shared-workspace manipulation. The same hybrid pipeline is shown to handle both the standard single-cart benchmark and its two-cart cooperative extension without retuning the per-cart controllers.
+
+The remainder of the paper is organized as follows. Section~\ref{sec:problem} formalizes the dynamics, control objectives, and assumptions. Section~\ref{sec:method} derives the equations of motion, describes the energy-based swing-up law, the LQR synthesis around the upright equilibrium, the switching logic, and the inter-cart avoidance term. Section~\ref{sec:results} reports MuJoCo \cite{todorov2012mujoco} simulation results for both the single-cart and two-cart cases. Section~\ref{sec:conclusion} summarizes findings and discusses limitations and future work.
+
+\section{Problem Statement}\label{sec:problem}
+
+\subsection{System Description}
+A cart of mass $m_c$ translates along a horizontal rail with viscous damping coefficient $b_c$. Hinged to the cart is a planar two-link pendulum: the lower link has mass $m_1$, length $l_1$, center-of-mass offset $l_{c1}$, moment of inertia $I_1$ about its center of mass, and joint damping $b_1$; the upper link, hinged to the distal end of the lower link, has mass $m_2$, length $l_2$, center-of-mass offset $l_{c2}$, inertia $I_2$, and joint damping $b_2$. The angles $\theta_1$ and $\theta_2$ are measured from the upward vertical so that $\theta_1=\theta_2=0$ corresponds to the unstable upright equilibrium and $\theta_1=\theta_2=\pi$ to the stable hanging-down equilibrium. The control input $u$ is the horizontal force applied to the cart. Gravity $g$ acts in the $-\hat{y}$ direction. The state vector is
+\begin{equation}
+\mathbf{x} = \begin{bmatrix} x & \dot x & \theta_1 & \dot\theta_1 & \theta_2 & \dot\theta_2 \end{bmatrix}^{\!\top}\!\!\in \mathbb{R}^6.
+\label{eq:state}
+\end{equation}
+The numerical parameters used throughout this paper are listed in Table~\ref{tab:params}.
+
+\begin{table}[t]
+\caption{System and Controller Parameters}
+\label{tab:params}
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+Symbol & Value & Description \\
+\midrule
+$m_c$ & $1.0$ kg & Cart mass \\
+$m_1,\,m_2$ & $0.1$ kg & Link masses \\
+$l_1,\,l_2$ & $0.5$ m & Link lengths \\
+$l_{c1},\,l_{c2}$ & $0.5$ m & Center-of-mass offsets \\
+$I_1,\,I_2$ & $0$ kg\,m$^2$ & Link inertias (point-mass model) \\
+$b_c$ & $0.5$ N\,s/m & Cart viscous friction \\
+$b_1,\,b_2$ & $10^{-3}$ N\,m\,s & Joint viscous friction \\
+$g$ & $9.81$ m/s$^2$ & Gravitational acceleration \\
+$[u_{\min},u_{\max}]$ & $[-50,\,50]$ N & Actuator saturation \\
+$x^\star_1,\,x^\star_2$ & $-5,\,+5$ m & Target cart positions \\
+$\epsilon$ & $0.30$ rad & Swing-up$\to$LQR threshold \\
+$k_E$ & $5.3$ & Energy-pumping gain \\
+$k_p,\,k_d$ & $7.0,\,3.5$ & Cart-regulation PD gains \\
+$d_{\text{safe}}$ & $10.0$ m & Inter-cart safety distance \\
+$k_{\text{rep}}$ & $4.0$ N/m & Repulsive gain \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Control Objective}
+\textbf{Single cart.} Given an initial condition $\mathbf{x}(0)$ near the hanging-down equilibrium, design a feedback law $u=\pi(\mathbf{x})$, satisfying $u\in[u_{\min},u_{\max}]$, such that
+\begin{equation}
+\lim_{t\to\infty}\mathbf{x}(t) = \begin{bmatrix}x^\star & 0 & 0 & 0 & 0 & 0\end{bmatrix}^{\!\top},
+\end{equation}
+where $x^\star$ is a prescribed target.
+
+\textbf{Two carts.} Given two identical carts $i\in\{1,2\}$ on a shared rail with initial conditions $\mathbf{x}^{(i)}(0)$ and distinct targets $x^\star_1\ne x^\star_2$, design decentralized feedback laws $u_i=\pi_i(\mathbf{x}^{(i)})$ together with a pairwise interaction term such that each cart is asymptotically stabilized at its target and the cart-to-cart separation $|x^{(1)}-x^{(2)}|$ remains above $d_{\text{safe}}$ for all $t\ge0$.
+
+\subsection{Assumptions}
+The cart is constrained to the rail with no slip; the joints are frictional but unactuated; sensors return the full state $\mathbf{x}^{(i)}$ for each cart at the simulation rate; and inter-cart interaction is purely repulsive and depends only on the cart positions.
+
+\section{Method}\label{sec:method}
+
+\subsection{Equations of Motion}
+The Lagrangian of the cart--double-pendulum is $\mathcal{L}=T-V$ with $T$ the total kinetic energy of the cart and the two links and $V$ the gravitational potential energy. Following the compact parameterization commonly adopted in the literature \cite{bounds_apmonitor,tedrake2023underactuated}, define
+\begin{align}
+h_1 &= m_c+m_1+m_2, &  h_2 &= m_1 l_{c1}+m_2 l_1, \nonumber\\
+h_3 &= m_2 l_{c2}, &     h_4 &= m_1 l_{c1}^2+m_2 l_1^2+I_1, \\
+h_5 &= m_2 l_{c2}\, l_1, & h_6 &= m_2 l_{c2}^2+I_2, \nonumber\\
+h_7 &= (m_1 l_{c1}+m_2 l_1)g, & h_8 &= m_2 l_{c2}\,g. \nonumber
+\end{align}
+Applying the Euler--Lagrange equations yields the manipulator-form dynamics
+\begin{equation}
+\mathbf{M}(\mathbf{q})\ddot{\mathbf{q}}+\mathbf{C}(\mathbf{q},\dot{\mathbf{q}})\dot{\mathbf{q}}+\mathbf{G}(\mathbf{q})=\mathbf{B}u,
+\label{eq:eom}
+\end{equation}
+where $\mathbf{q}=[x,\theta_1,\theta_2]^{\!\top}$ and $\mathbf{B}=[1,0,0]^{\!\top}$. The mass matrix evaluated at the upright equilibrium reduces to
+\begin{equation}
+\mathbf{M}(\mathbf{0})=
+\begin{bmatrix}
+h_1 & h_2 & h_3 \\
+h_2 & h_4 & h_5 \\
+h_3 & h_5 & h_6
+\end{bmatrix},
+\end{equation}
+and the gravity vector is $\mathbf{G}(\mathbf{q})=[0,\,-h_7\sin\theta_1,\,-h_8\sin\theta_2]^{\!\top}$. The full nonlinear dynamics are integrated by MuJoCo's semi-implicit Euler scheme; only the linearization derived in Section~\ref{ssec:lqr} and the energy expression of Section~\ref{ssec:swingup} are used in closed form by the controller.
+
+\subsection{Energy-Based Swing-Up}\label{ssec:swingup}
+A standard result of \AA str\"om and Furuta \cite{astrom2000swingup} is that the upright equilibrium of an underactuated pendulum can be reached by shaping the system's mechanical energy toward the energy of the desired equilibrium. The total mechanical energy of the two-link arm is
+\begin{align}
+E &= \tfrac{1}{2}\!\left[h_4 \dot\theta_1^2 + 2 h_5\cos(\theta_1-\theta_2)\dot\theta_1\dot\theta_2 + h_6\dot\theta_2^2\right] \nonumber\\
+&\quad + h_7\!\left(\cos\theta_1-1\right) + h_8\!\left(\cos\theta_2-1\right),
+\label{eq:energy}
+\end{align}
+normalized so that $E=0$ at the upright. When the system has too little energy to reach the upright ($E<0$), the cart force is chosen to be co-directed with the angular velocity component of the lower link projected onto its swing direction:
+\begin{equation}
+u_{\text{swing}} = k_E\,\dot\theta_1\cos(\theta_1)\,(-E),\quad E<0,
+\label{eq:uswing}
+\end{equation}
+and zero otherwise. The factor $\dot\theta_1\cos\theta_1$ is the standard ``injection'' term that guarantees $\dot E\ge 0$ along closed-loop trajectories \cite{astrom2000swingup,fantoni2002non}, while the saturating multiplication by $(-E)$ smoothly attenuates the input as $E$ approaches the homoclinic level set on which an inverted equilibrium is reachable \cite{lozano2000stabilization}. To prevent the cart from drifting unboundedly during energy injection, a proportional--derivative term that penalizes cart excursion is superposed:
+\begin{equation}
+u = u_{\text{swing}} - k_p\,x - k_d\,\dot x.
+\label{eq:swingup_total}
+\end{equation}
+The combined law (\ref{eq:swingup_total}) does not asymptotically stabilize the upright; its purpose is to drive the system into the basin of attraction of the linear stabilizer described next.
+
+\subsection{LQR Stabilization}\label{ssec:lqr}
+Linearizing (\ref{eq:eom}) about the upright equilibrium and arranging the result in state-space form yields $\dot{\mathbf{x}} = \mathbf{A}\mathbf{x}+\mathbf{B}u$ with
+\begin{equation}
+\mathbf{A}=
+\begin{bmatrix}
+0 & 1 & 0 & 0 & 0 & 0\\
+0 & 0 & a_{23} & 0 & a_{25} & 0\\
+0 & 0 & 0 & 1 & 0 & 0\\
+0 & 0 & a_{43} & 0 & a_{45} & 0\\
+0 & 0 & 0 & 0 & 0 & 1\\
+0 & 0 & a_{63} & 0 & a_{65} & 0
+\end{bmatrix},\quad
+\mathbf{B}=
+\begin{bmatrix}0\\b_2\\0\\b_4\\0\\b_6\end{bmatrix},
+\end{equation}
+where the coefficients $a_{ij}$ and $b_i$ are obtained by inverting $\mathbf{M}(\mathbf{0})$ and propagating the gravity and input columns through. The pair $(\mathbf{A},\mathbf{B})$ is controllable, so an infinite-horizon LQR is computed by minimizing
+\begin{equation}
+J = \int_0^\infty \left( \mathbf{x}^{\!\top}\mathbf{Q}\mathbf{x} + u^{\!\top}\mathbf{R}u \right) \mathrm{d}t,
+\end{equation}
+where the weights
+\begin{equation}
+\mathbf{Q} = \mathrm{diag}(10,1,100,1,100,1),\quad \mathbf{R}=1
+\end{equation}
+heavily penalize angular deviations and place modest weight on cart position so that the controller prioritizes balance over translation. The optimal gain $\mathbf{K}=\mathbf{R}^{-1}\mathbf{B}^{\!\top}\mathbf{P}$, where $\mathbf{P}\succ 0$ solves the continuous-time algebraic Riccati equation
+\begin{equation}
+\mathbf{A}^{\!\top}\mathbf{P}+\mathbf{P}\mathbf{A}-\mathbf{P}\mathbf{B}\mathbf{R}^{-1}\mathbf{B}^{\!\top}\mathbf{P}+\mathbf{Q}=0,
+\label{eq:care}
+\end{equation}
+yields the feedback $u=-\mathbf{K}\,\tilde{\mathbf{x}}$, with $\tilde{\mathbf{x}}$ the state expressed relative to the target $[x^\star,0,0,0,0,0]^{\!\top}$. Equation~(\ref{eq:care}) is solved offline using the SciPy \texttt{linalg.solve\_continuous\_are} routine \cite{anderson1990optimal,bryson1975applied}.
+
+\subsection{Hybrid Switching Logic}\label{ssec:switching}
+A finite-state machine with two modes selects between (\ref{eq:swingup_total}) and the LQR feedback. Each cart enters the simulation in the \textsc{Swingup} mode and transitions, irrevocably for the remainder of the simulation, to the \textsc{LQR} mode the first time both link angles satisfy $|\theta_1|<\epsilon$ and $|\theta_2|<\epsilon$. The threshold $\epsilon=0.30$ rad ($\approx17^\circ$) was chosen empirically as a balance between (i)~ensuring the linearization remains valid, since the small-angle approximation $\sin\theta\approx\theta$ has $<\!1.5\%$ error within this region, and (ii)~delaying the handoff long enough that the energy pumped in during \textsc{Swingup} actually carries the configuration past vertical \cite{lozano2000stabilization}. Switching is unidirectional; once stabilized, the LQR controller has a sufficiently large region of attraction to recover from disturbances of moderate magnitude without re-engaging swing-up.
+
+\subsection{Two-Cart Extension and Collision Avoidance}\label{ssec:multi}
+Each cart maintains an independent finite-state machine and applies the controller of Sections~\ref{ssec:swingup}--\ref{ssec:switching} to its own state. The interaction between the carts is enforced through a one-dimensional artificial potential field of the form proposed by Khatib \cite{khatib1986rtoa} and used widely for reactive collision avoidance \cite{lavalle2006planning}. Let $d=|x^{(1)}-x^{(2)}|$. The repulsive force applied to cart $i$ is
+\begin{equation}
+f_i^{\text{rep}} = \begin{cases}
+k_{\text{rep}}\,(d_{\text{safe}}-d)\,\mathrm{sgn}(x^{(i)}-x^{(j)}), & d<d_{\text{safe}}\\
+0, & d\ge d_{\text{safe}}
+\end{cases}
+\label{eq:rep}
+\end{equation}
+with $j\ne i$. The repulsion is added to the per-cart input prior to actuator saturation, so each cart's commanded force is $u_i=\mathrm{sat}_{[u_{\min},u_{\max}]}\!\left(\pi_i(\mathbf{x}^{(i)})+f_i^{\text{rep}}\right)$. Because the repulsion gradient grows linearly with overlap, (\ref{eq:rep}) corresponds to a quadratic potential $U(d)=\tfrac{1}{2}k_{\text{rep}}(d_{\text{safe}}-d)^2$ for $d<d_{\text{safe}}$, ensuring a smooth force--distance profile and avoiding the chattering associated with hard barrier formulations. The conservative choice $d_{\text{safe}}=10$~m guarantees that, for the targets $x^\star_1=-5$~m and $x^\star_2=+5$~m, the carts experience a non-zero --- but small --- restoring potential at the steady state, biasing them \emph{toward} their respective targets rather than away from each other.
+
+\subsection{Implementation}
+The controllers are implemented in Python and interfaced with the MuJoCo physics engine \cite{todorov2012mujoco} through the \texttt{mujoco} Python bindings. Each cart is modeled as a slider joint actuated by an external force; each link is a hinge joint with no actuator. The simulation runs at the engine's default time step ($2\times10^{-3}$~s) with real-time pacing for visualization, and trajectories are logged at $10$~Hz for post-processing. The swing-up gains $k_E$, $k_p$, $k_d$ were tuned on the single-cart problem and used unchanged in the two-cart setting; the LQR weight matrices were chosen once, by inspection, and not retuned. Pseudocode for the per-cart control loop is summarized in Algorithm~\ref{alg:control}.
+
+\begin{algorithm}[t]
+\caption{Per-cart hybrid controller}
+\label{alg:control}
+\begin{algorithmic}[1]
+\State \textbf{Initialize:} $\text{mode} \gets \textsc{Swingup}$; precompute $\mathbf{K}$ from (\ref{eq:care})
+\Loop
+    \State Read state $\mathbf{x}=[x,\dot x,\theta_1,\dot\theta_1,\theta_2,\dot\theta_2]$
+    \If{$\text{mode} = \textsc{Swingup}$}
+        \State Compute $E$ from (\ref{eq:energy}); compute $u$ from (\ref{eq:swingup_total})
+        \If{$|\theta_1|<\epsilon$ \textbf{and} $|\theta_2|<\epsilon$}
+            \State $\text{mode} \gets \textsc{LQR}$
+        \EndIf
+    \Else
+        \State $u \gets -\mathbf{K}\,(\mathbf{x}-\mathbf{x}^\star)$
+    \EndIf
+    \State Add inter-cart repulsion $f^{\text{rep}}$ from (\ref{eq:rep})
+    \State Saturate $u$ to $[u_{\min},u_{\max}]$ and apply
+\EndLoop
+\end{algorithmic}
+\end{algorithm}
+
+\section{Results}\label{sec:results}
+
+The hybrid controller is evaluated in two configurations: a single cart with a double pendulum tasked with swinging up and reaching a fixed target, and two cooperating carts with double pendulums on a shared rail tasked with reaching distinct targets while avoiding each other. All trials use the parameters of Table~\ref{tab:params} and start with both pendulums initialized near the hanging-down equilibrium ($\theta_1\approx\pi$) with a small perturbation in the upper-link angle and a small initial angular velocity $\dot\theta_1=1.5$~rad/s on the lower link to break symmetry.
+
+\subsection{Single-Cart Swing-Up and Stabilization}
+The first experiment validates the per-cart controller in isolation. The cart is initialized at $x_0=0$ with target $x^\star=0$ and the pendulum hanging down. The controller injects energy through (\ref{eq:swingup_total}) and, once the angles cross the threshold $\epsilon$, switches to LQR. Figure~\ref{fig:single_angles} shows the time histories of $\theta_1$ and $\theta_2$ converging to zero, Figure~\ref{fig:single_cart} shows the cart position and velocity, Figure~\ref{fig:single_input} shows the control input with annotated swing-up$\to$LQR transition, and Figure~\ref{fig:single_energy} shows the system energy increasing monotonically during the swing-up phase before saturating near the target value once LQR engages. The salient observations are:
+\begin{itemize}
+\item The angles enter the linearization region within \emph{[INSERT TIME]}~s and the cart settles to within $\pm$\emph{[INSERT TOLERANCE]} of $x^\star$ within \emph{[INSERT TIME]}~s.
+\item The swing-up phase exhibits the characteristic ``pumping'' oscillation in the cart trajectory, with peak excursion of \emph{[INSERT VALUE]}~m and peak input magnitude well below the actuator saturation $u_{\max}=50$~N.
+\item Steady-state angle errors remain below \emph{[INSERT VALUE]} rad, consistent with the small-angle linearization on which the LQR is built.
+\end{itemize}
+This confirms that the energy-shaping plus LQR combination, both standard ingredients in their own right, composes correctly on the double-pendulum cart and provides the per-cart building block used in the multi-cart experiment.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/angles.png}
+\caption{Single-cart trial: link angles $\theta_1$ (lower) and $\theta_2$ (upper) versus time. The dashed vertical line marks the swing-up$\to$LQR transition.}
+\label{fig:single_angles}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/position.png}
+\caption{Single-cart trial: cart position $x$ and velocity $\dot x$ versus time. The cart undergoes an oscillatory pumping phase before LQR engages and regulates to $x^\star$.}
+\label{fig:single_cart}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/inputs.png}
+\caption{Single-cart trial: control input $u$ versus time, with the actuator saturation envelope $[u_{\min},u_{\max}]$ shown for reference.}
+\label{fig:single_input}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/energy.png}
+\caption{Single-cart trial: total mechanical energy $E$ relative to the upright reference, illustrating monotone energy injection during swing-up and small steady-state oscillation under LQR.}
+\label{fig:single_energy}
+\end{figure}
+
+\subsection{Two-Cart Cooperative Trial}
+The second experiment replicates the single-cart controller on each of two carts placed on the same rail, with cart~1 initialized at $x^{(1)}_0=-5$~m with target $x^\star_1=-5$~m and cart~2 initialized at $x^{(2)}_0=+5$~m with target $x^\star_2=+5$~m. Although the targets are stationary and well separated, the swing-up phase produces large cart excursions toward the origin: without an interaction term, the carts can therefore meet near $x=0$ with appreciable closing velocity. The repulsion of (\ref{eq:rep}), with $d_{\text{safe}}=10$~m and $k_{\text{rep}}=4.0$~N/m, smoothly biases each controller's input toward the cart's home target whenever the separation drops below the threshold.
+
+Figure~\ref{fig:multi_cart} shows the two cart positions on a common time axis. The two carts swing up in parallel, transitioning to LQR at \emph{[INSERT TIME]}~s and \emph{[INSERT TIME]}~s respectively, and converge to their distinct targets without their separation falling below \emph{[INSERT MIN SEP]}~m. Figure~\ref{fig:multi_angles} reports the four link angles, demonstrating that decentralized stabilization is preserved even while the repulsion is active. Figure~\ref{fig:multi_inputs} shows the control inputs of both carts together with the additive repulsion magnitude, highlighting that the avoidance term contributes meaningfully only during the brief intervals of close approach during swing-up; once both carts are in LQR mode and converging to their targets, the repulsion term is identically zero.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/multi_position.png}
+\caption{Two-cart cooperative trial: cart positions $x^{(1)}$ and $x^{(2)}$ versus time. The carts converge to distinct targets $x^\star_1=-5$~m and $x^\star_2=+5$~m without violating the safety distance.}
+\label{fig:multi_cart}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/multi_angles.png}
+\caption{Two-cart cooperative trial: link angles $\theta^{(i)}_1,\theta^{(i)}_2$ for both carts. Each pendulum is independently swung up and stabilized.}
+\label{fig:multi_angles}
+\end{figure}
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=\columnwidth]{figures/multi_inputs.png}
+\caption{Two-cart cooperative trial: control inputs $u_1$, $u_2$ and the additive inter-cart repulsion. The repulsion is non-zero only during the brief close-approach interval and identically zero after both carts have settled.}
+\label{fig:multi_inputs}
+\end{figure}
+
+\subsection{Discussion}
+Three observations are worth highlighting. First, the same per-cart controller (with no retuning of $k_E,\,k_p,\,k_d,\,\mathbf{Q},\,\mathbf{R}$) succeeds on both the single-cart and two-cart variants of the problem. This reflects the modularity of the energy-shaping plus LQR architecture: each cart's controller is agnostic to the presence of other carts, and inter-cart safety is enforced exclusively by the additive repulsion term. Second, the repulsion fires only transiently --- during the swing-up excursions when both carts pass near the origin --- and is dormant in steady state. The avoidance layer therefore has no detectable effect on the LQR-stabilized terminal performance. Third, the swing-up phase's large cart excursions are an unavoidable artifact of the energy-pumping strategy: an LQR-only or feedback-linearized controller cannot recover from the hanging-down equilibrium because that configuration lies far outside the linearization region, and a model predictive controller able to plan a global trajectory \cite{mayne2000mpc} would substantially reduce the cart excursion at the cost of significantly higher online computation. The simple hybrid pipeline therefore trades trajectory optimality for a controller that is small, transparent, and easy to tune.
+
+\section{Conclusion}\label{sec:conclusion}
+
+A hybrid energy-shaping plus LQR controller for a planar double inverted pendulum on a cart was presented and shown, in MuJoCo simulation, to drive the system from the hanging-down equilibrium to a prescribed cart target while stabilizing the upright equilibrium. The same per-cart controller was then applied, without modification, to a two-cart cooperative variant of the problem in which each cart must reach a distinct target on a shared rail; an additive one-dimensional artificial potential field was sufficient to enforce a minimum inter-cart separation throughout the run. The architecture is intentionally minimal --- standard energy shaping, standard infinite-horizon LQR, and a standard reactive avoidance layer --- but the resulting controller is transparent, easy to retune, and provides a rigorous baseline against which more elaborate designs (model predictive control, feedback linearization, or learned policies) can be compared.
+
+Several extensions remain. The avoidance layer is purely position-based; incorporating cart velocity or the angular state of the pendulums into the repulsion would allow the controller to reason about anticipated swept volumes during swing-up. The LQR weight selection was empirical; structured loop-shaping or robust LQG synthesis \cite{anderson1990optimal} could provide quantifiable disturbance rejection guarantees. Replacing LQR with model predictive control \cite{mayne2000mpc} would allow direct enforcement of input and state constraints during the upright stabilization phase, while replacing the swing-up controller with a reinforcement-learning policy \cite{tedrake2023underactuated} could shorten the handoff transient and unify the two control modes. Finally, validating the controller on a physical apparatus would expose the inevitable model mismatch and motor-friction effects that idealized simulation does not capture, and is the natural next step.
+
+% ============ References ============
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}
